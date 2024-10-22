@@ -7,8 +7,10 @@ import (
 	"log"
 )
 
+type SimpleQueueType int
+
 const (
-	TransientQueue = iota
+	TransientQueue SimpleQueueType = iota
 	DurableQueue
 )
 
@@ -23,7 +25,7 @@ func PublishJSON[T any](ch *amqp.Channel, exchange, key string, val T) error {
 	return nil
 }
 
-func DeclareAndBind(conn *amqp.Connection, exchange, queueName, key string, simpleQueueType int) (*amqp.Channel, amqp.Queue, error) {
+func DeclareAndBind(conn *amqp.Connection, exchange, queueName, key string, simpleQueueType SimpleQueueType) (*amqp.Channel, amqp.Queue, error) {
 	amqpChan, err := conn.Channel()
 	durable := false
 	autoDelete := false
@@ -50,4 +52,28 @@ func DeclareAndBind(conn *amqp.Connection, exchange, queueName, key string, simp
 	}
 	amqpChan.QueueBind(queueName, key, exchange, noWait, nil)
 	return amqpChan, queue, nil
+}
+
+func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string, simpleQueueType SimpleQueueType, handler func(T)) error {
+	amqpChan, _, err := DeclareAndBind(conn, exchange, queueName, key, simpleQueueType)
+	if err != nil {
+		return err
+	}
+	deliveryChan, err := amqpChan.Consume(queueName, "", false, false, false, false, nil)
+	if err != nil {
+		return err
+	}
+	go func(delChan <-chan amqp.Delivery) {
+		for del := range delChan {
+			var msg T
+			err := json.Unmarshal(del.Body, &msg)
+			if err != nil {
+				log.Println(err)
+			}
+			handler(msg)
+			del.Ack(false)
+		}
+	}(deliveryChan)
+
+	return nil
 }

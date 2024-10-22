@@ -10,6 +10,20 @@ import (
 	"github.com/thrashdev/bootdev-peril/internal/routing"
 )
 
+func HandlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+	return func(ps routing.PlayingState) {
+		defer fmt.Print("> ")
+		gs.HandlePause(ps)
+	}
+}
+
+func HandlerMove(gs *gamelogic.GameState) func(move gamelogic.ArmyMove) {
+	return func(move gamelogic.ArmyMove) {
+		defer fmt.Print("> ")
+		gs.HandleMove(move)
+	}
+}
+
 func main() {
 	fmt.Println("Starting Peril client...")
 	conn_string := "amqp://guest:guest@localhost:5672/"
@@ -27,11 +41,25 @@ func main() {
 		log.Fatal(err)
 	}
 	queueName := fmt.Sprintf("%s.%s", routing.PauseKey, username)
-	_, _, err = pubsub.DeclareAndBind(conn, "peril_direct", queueName, routing.PauseKey, pubsub.TransientQueue)
+	amqpChan, _, err := pubsub.DeclareAndBind(conn, routing.ExchangePerilDirect, queueName, routing.PauseKey, pubsub.TransientQueue)
 	if err != nil {
-		log.Fatal("Crashed on declaring the queue and binding")
+		log.Fatal("Crashed on declaring:", routing.ExchangePerilDirect)
 	}
 	gameState := gamelogic.NewGameState(username)
+
+	err = pubsub.SubscribeJSON(conn, routing.ExchangePerilDirect, queueName, routing.PauseKey, pubsub.TransientQueue, HandlerPause(gameState))
+	if err != nil {
+		log.Println("Crashed at subscribing to:", queueName)
+		log.Fatal(err)
+	}
+
+	armyMovesWildcard := routing.ArmyMovesPrefix + ".*"
+	armyQueueName := routing.ArmyMovesPrefix + "." + username
+	err = pubsub.SubscribeJSON(conn, routing.ExchangePerilTopic, armyQueueName, armyMovesWildcard, pubsub.TransientQueue, HandlerMove(gameState))
+	if err != nil {
+		log.Println("Crashed at subscribing to:", armyQueueName)
+		log.Fatal(err)
+	}
 
 	stop := false
 	for stop == false {
@@ -44,7 +72,13 @@ func main() {
 				log.Fatal(err)
 			}
 		case "move":
-			gameState.CommandMove(words)
+			armyMove, err := gameState.CommandMove(words)
+			if err != nil {
+				log.Println("Error encountered during army move")
+				continue
+			}
+			pubsub.PublishJSON(amqpChan, routing.ExchangePerilTopic, armyQueueName, armyMove)
+			fmt.Println("Successfully published move:", armyMove)
 		case "status":
 			gameState.CommandStatus()
 		case "help":
