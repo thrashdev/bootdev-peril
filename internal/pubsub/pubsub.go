@@ -14,6 +14,14 @@ const (
 	DurableQueue
 )
 
+type AckType int
+
+const (
+	Ack AckType = iota
+	NackRequeue
+	NackDiscard
+)
+
 func PublishJSON[T any](ch *amqp.Channel, exchange, key string, val T) error {
 	marshalled, err := json.Marshal(val)
 	if err != nil {
@@ -45,7 +53,9 @@ func DeclareAndBind(conn *amqp.Connection, exchange, queueName, key string, simp
 		log.Println("Crashed on creating AMQP Channel")
 		return &amqp.Channel{}, amqp.Queue{}, err
 	}
-	queue, err := amqpChan.QueueDeclare(queueName, durable, autoDelete, exclusive, noWait, nil)
+	table := amqp.Table{}
+	table["x-dead-letter-exchange"] = "peril_dlx"
+	queue, err := amqpChan.QueueDeclare(queueName, durable, autoDelete, exclusive, noWait, table)
 	if err != nil {
 		log.Println("Crashed on Creating a Queue")
 		return &amqp.Channel{}, amqp.Queue{}, err
@@ -54,7 +64,7 @@ func DeclareAndBind(conn *amqp.Connection, exchange, queueName, key string, simp
 	return amqpChan, queue, nil
 }
 
-func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string, simpleQueueType SimpleQueueType, handler func(T)) error {
+func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string, simpleQueueType SimpleQueueType, handler func(T) AckType) error {
 	amqpChan, _, err := DeclareAndBind(conn, exchange, queueName, key, simpleQueueType)
 	if err != nil {
 		return err
@@ -64,14 +74,25 @@ func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string
 		return err
 	}
 	go func(delChan <-chan amqp.Delivery) {
-		for del := range delChan {
-			var msg T
-			err := json.Unmarshal(del.Body, &msg)
+		for msg := range delChan {
+			var payload T
+			err := json.Unmarshal(msg.Body, &payload)
 			if err != nil {
 				log.Println(err)
 			}
-			handler(msg)
-			del.Ack(false)
+			ackType := handler(payload)
+			switch ackType {
+			case Ack:
+				msg.Ack(false)
+				log.Println("Acked msg: ", msg)
+			case NackRequeue:
+				msg.Nack(false, true)
+				log.Println("NackRequeued msg: ", msg)
+			case NackDiscard:
+				msg.Nack(false, false)
+				log.Println("NackDiscarded msg: ", msg)
+			}
+			msg.Ack(false)
 		}
 	}(deliveryChan)
 
