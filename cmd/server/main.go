@@ -12,6 +12,17 @@ import (
 	"github.com/thrashdev/bootdev-peril/internal/routing"
 )
 
+func handlerLogs() func(gl routing.GameLog) pubsub.Acktype {
+	return func(gl routing.GameLog) pubsub.Acktype {
+		defer fmt.Print("> ")
+		err := gamelogic.WriteLog(gl)
+		if err != nil {
+			return pubsub.NackRequeue
+		}
+		return pubsub.Ack
+	}
+}
+
 func main() {
 	fmt.Println("Starting Peril server...")
 	gamelogic.PrintServerHelp()
@@ -29,7 +40,8 @@ func main() {
 		log.Fatal(err)
 	}
 	gameLogKey := routing.GameLogSlug + ".*"
-	_, _, err = pubsub.DeclareAndBind(conn, routing.ExchangePerilTopic, routing.GameLogSlug, gameLogKey, pubsub.DurableQueue)
+	err = pubsub.SubscribeGob(conn, routing.ExchangePerilTopic, routing.GameLogSlug, gameLogKey, pubsub.SimpleQueueDurable, handlerLogs())
+	// _, _, err = pubsub.DeclareAndBind(conn, routing.ExchangePerilTopic, routing.GameLogSlug, gameLogKey, pubsub.SimpleQueueDurable)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -37,6 +49,9 @@ func main() {
 	for stop == false {
 		input := gamelogic.GetInput()
 		fmt.Println(input)
+		if len(input) == 0 {
+			continue
+		}
 		switch input[0] {
 		case "pause":
 			fmt.Println("Pausing...")
